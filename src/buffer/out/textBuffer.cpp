@@ -4,7 +4,6 @@
 #include "precomp.h"
 
 #include "textBuffer.hpp"
-#include "CharRow.hpp"
 
 #include "../renderer/base/renderer.hpp"
 #include "../types/inc/utils.hpp"
@@ -35,25 +34,34 @@ TextBuffer::TextBuffer(const COORD screenBufferSize,
                        const UINT cursorSize,
                        const bool isActiveBuffer,
                        Microsoft::Console::Render::Renderer& renderer) :
-    _firstRow{ 0 },
     _currentAttributes{ defaultAttributes },
     _cursor{ cursorSize, *this },
-    _storage{},
-    _unicodeStorage{},
     _isActiveBuffer{ isActiveBuffer },
-    _renderer{ renderer },
-    _size{},
-    _currentHyperlinkId{ 1 },
-    _currentPatternId{ 0 }
+    _renderer{ renderer }
 {
-    // initialize ROWs
+    static_assert(sizeof(wchar_t) == sizeof(uint16_t));
+
+    const auto stride = (static_cast<size_t>(screenBufferSize.X) + 1) * sizeof(uint16_t);
+    const auto rows = static_cast<size_t>(screenBufferSize.Y);
+    const auto halfSize = stride * rows;
+    auto buffer = static_cast<std::byte*>(VirtualAlloc(nullptr, 2 * halfSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    THROW_IF_NULL_ALLOC(buffer);
+
+    _charBuffer = buffer;
+
     _storage.reserve(static_cast<size_t>(screenBufferSize.Y));
-    for (size_t i = 0; i < static_cast<size_t>(screenBufferSize.Y); ++i)
+    for (SHORT i = 0; i < screenBufferSize.Y; ++i)
     {
-        _storage.emplace_back(static_cast<SHORT>(i), screenBufferSize.X, _currentAttributes, this);
+        _storage.emplace_back(reinterpret_cast<wchar_t*>(buffer), reinterpret_cast<uint16_t*>(buffer + halfSize), screenBufferSize.X, _currentAttributes);
+        buffer += stride;
     }
 
     _UpdateSize();
+}
+
+TextBuffer::~TextBuffer()
+{
+    VirtualFree(_charBuffer, 0, MEM_RELEASE);
 }
 
 // Routine Description:
@@ -88,11 +96,9 @@ UINT TextBuffer::TotalRowCount() const noexcept
 // - const reference to the requested row. Asserts if out of bounds.
 const ROW& TextBuffer::GetRowByOffset(const size_t index) const
 {
-    const size_t totalRows = TotalRowCount();
-
     // Rows are stored circularly, so the index you ask for is offset by the start position and mod the total of rows.
-    const auto offsetIndex = (_firstRow + index) % totalRows;
-    return _storage.at(offsetIndex);
+    const auto offsetIndex = (_firstRow + index) % _storage.size();
+    return _storage[offsetIndex];
 }
 
 // Routine Description:
@@ -104,11 +110,9 @@ const ROW& TextBuffer::GetRowByOffset(const size_t index) const
 // - reference to the requested row. Asserts if out of bounds.
 ROW& TextBuffer::GetRowByOffset(const size_t index)
 {
-    const size_t totalRows = TotalRowCount();
-
     // Rows are stored circularly, so the index you ask for is offset by the start position and mod the total of rows.
-    const auto offsetIndex = (_firstRow + index) % totalRows;
-    return _storage.at(offsetIndex);
+    const auto offsetIndex = (_firstRow + index) % _storage.size();
+    return _storage[offsetIndex];
 }
 
 // Routine Description:
@@ -206,7 +210,7 @@ bool TextBuffer::_AssertValidDoubleByteSequence(const DbcsAttribute dbcsAttribut
     DbcsAttribute prevDbcsAttr;
     try
     {
-        prevDbcsAttr = prevRow.GetCharRow().DbcsAttrAt(coordPrevPosition.X);
+        prevDbcsAttr = prevRow.DbcsAttrAt(coordPrevPosition.X);
     }
     catch (...)
     {
@@ -422,12 +426,9 @@ bool TextBuffer::InsertCharacter(const std::wstring_view chars,
         auto& Row = GetRowByOffset(iRow);
 
         // Store character and double byte data
-        auto& charRow = Row.GetCharRow();
-
         try
         {
-            charRow.GlyphAt(iCol) = chars;
-            charRow.DbcsAttrAt(iCol) = dbcsAttribute;
+            Row.Replace(iCol, dbcsAttribute.IsSingle() ? 1 : 2, chars);
         }
         catch (...)
         {
@@ -436,7 +437,7 @@ bool TextBuffer::InsertCharacter(const std::wstring_view chars,
         }
 
         // Store color data
-        fSuccess = Row.GetAttrRow().SetAttrToEnd(iCol, attr);
+        fSuccess = Row.SetAttrToEnd(iCol, attr);
         if (fSuccess)
         {
             // Advance the cursor
@@ -614,7 +615,7 @@ COORD TextBuffer::GetLastNonSpaceCharacter(std::optional<const Microsoft::Consol
 
     const auto& currRow = GetRowByOffset(coordEndOfText.Y);
     // The X position of the end of the valid text is the Right draw boundary (which is one beyond the final valid character)
-    coordEndOfText.X = gsl::narrow<short>(currRow.GetCharRow().MeasureRight()) - 1;
+    coordEndOfText.X = gsl::narrow<short>(currRow.MeasureRight()) - 1;
 
     // If the X coordinate turns out to be -1, the row was empty, we need to search backwards for the real end of text.
     const auto viewportTop = viewport.Top();
@@ -625,7 +626,7 @@ COORD TextBuffer::GetLastNonSpaceCharacter(std::optional<const Microsoft::Consol
         const auto& backupRow = GetRowByOffset(coordEndOfText.Y);
         // We need to back up to the previous row if this line is empty, AND there are more rows
 
-        coordEndOfText.X = gsl::narrow<short>(backupRow.GetCharRow().MeasureRight()) - 1;
+        coordEndOfText.X = gsl::narrow<short>(backupRow.MeasureRight()) - 1;
         fDoBackUp = (coordEndOfText.X < 0 && coordEndOfText.Y > viewportTop);
     }
 
@@ -783,10 +784,6 @@ void TextBuffer::ScrollRows(const SHORT firstRow, const SHORT size, const SHORT 
         // - end
         std::rotate(_storage.begin() + firstRow, _storage.begin() + firstRow + size, _storage.begin() + firstRow + size + delta);
     }
-
-    // Renumber the IDs now that we've rearranged where the rows sit within the buffer.
-    // Refreshing should also delegate to the UnicodeStorage to re-key all the stored unicode sequences (where applicable).
-    _RefreshRowIDs(std::nullopt);
 }
 
 Cursor& TextBuffer::GetCursor() noexcept
@@ -904,6 +901,12 @@ void TextBuffer::Reset()
 {
     RETURN_HR_IF(E_INVALIDARG, newSize.X < 0 || newSize.Y < 0);
 
+    const auto stride = (static_cast<size_t>(newSize.X) + 1) * sizeof(uint16_t);
+    const auto rows = static_cast<size_t>(newSize.Y);
+    const auto halfSize = stride * rows;
+    auto buffer = static_cast<std::byte*>(VirtualAlloc(nullptr, 2 * halfSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    RETURN_IF_NULL_ALLOC(buffer);
+
     try
     {
         const auto currentSize = GetSize().Dimensions();
@@ -917,12 +920,7 @@ void TextBuffer::Reset()
         const SHORT TopRowIndex = (GetFirstRowIndex() + TopRow) % currentSize.Y;
 
         // rotate rows until the top row is at index 0
-        for (auto i = 0; i < TopRowIndex; i++)
-        {
-            _storage.emplace_back(std::move(_storage.front()));
-            _storage.erase(_storage.begin());
-        }
-
+        std::rotate(_storage.begin(), _storage.begin() + TopRowIndex, _storage.end());
         _SetFirstRowIndex(0);
 
         // realloc in the Y direction
@@ -934,30 +932,33 @@ void TextBuffer::Reset()
         // add rows if we're growing
         while (_storage.size() < static_cast<size_t>(newSize.Y))
         {
-            _storage.emplace_back(static_cast<short>(_storage.size()), newSize.X, attributes, this);
+            _storage.emplace_back(nullptr, nullptr, static_cast<uint16_t>(0), attributes);
         }
 
         // Now that we've tampered with the row placement, refresh all the row IDs.
         // Also take advantage of the row ID refresh loop to resize the rows in the X dimension
         // and cleanup the UnicodeStorage characters that might fall outside the resized buffer.
-        _RefreshRowIDs(newSize.X);
+        {
+            auto data = buffer;
+            for (auto& it : _storage)
+            {
+                it.Resize(reinterpret_cast<wchar_t*>(data), reinterpret_cast<uint16_t*>(data + halfSize), newSize.X);
+                data += stride;
+            }
+        }
 
         // Update the cached size value
         _UpdateSize();
     }
-    CATCH_RETURN();
+    catch (...)
+    {
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        RETURN_CAUGHT_EXCEPTION();
+    };
 
+    VirtualFree(_charBuffer, 0, MEM_RELEASE);
+    _charBuffer = buffer;
     return S_OK;
-}
-
-const UnicodeStorage& TextBuffer::GetUnicodeStorage() const noexcept
-{
-    return _unicodeStorage;
-}
-
-UnicodeStorage& TextBuffer::GetUnicodeStorage() noexcept
-{
-    return _unicodeStorage;
 }
 
 void TextBuffer::SetAsActiveBuffer(const bool isActiveBuffer) noexcept
@@ -1024,42 +1025,6 @@ void TextBuffer::TriggerNewTextNotification(const std::wstring_view newText)
 }
 
 // Routine Description:
-// - Method to help refresh all the Row IDs after manipulating the row
-//   by shuffling pointers around.
-// - This will also update parent pointers that are stored in depth within the buffer
-//   (e.g. it will update CharRow parents pointing at Rows that might have been moved around)
-// - Optionally takes a new row width if we're resizing to perform a resize operation and cleanup
-//   any high unicode (UnicodeStorage) runs while we're already looping through the rows.
-// Arguments:
-// - newRowWidth - Optional new value for the row width.
-void TextBuffer::_RefreshRowIDs(std::optional<SHORT> newRowWidth)
-{
-    std::unordered_map<SHORT, SHORT> rowMap;
-    SHORT i = 0;
-    for (auto& it : _storage)
-    {
-        // Build a map so we can update Unicode Storage
-        rowMap.emplace(it.GetId(), i);
-
-        // Update the IDs
-        it.SetId(i++);
-
-        // Also update the char row parent pointers as they can get shuffled up in the rotates.
-        it.GetCharRow().UpdateParent(&it);
-
-        // Resize the rows in the X dimension if we have a new width
-        if (newRowWidth.has_value())
-        {
-            // Realloc in the X direction
-            THROW_IF_FAILED(it.Resize(newRowWidth.value()));
-        }
-    }
-
-    // Give the new mapping to Unicode Storage
-    _unicodeStorage.Remap(rowMap, newRowWidth);
-}
-
-// Routine Description:
 // - Retrieves the first row from the underlying buffer.
 // Arguments:
 // - <none>
@@ -1068,27 +1033,6 @@ void TextBuffer::_RefreshRowIDs(std::optional<SHORT> newRowWidth)
 ROW& TextBuffer::_GetFirstRow()
 {
     return GetRowByOffset(0);
-}
-
-// Routine Description:
-// - Retrieves the row that comes before the given row.
-// - Does not wrap around the screen buffer.
-// Arguments:
-// - The current row.
-// Return Value:
-// - reference to the previous row
-// Note:
-// - will throw exception if called with the first row of the text buffer
-ROW& TextBuffer::_GetPrevRowNoWrap(const ROW& Row)
-{
-    auto prevRowIndex = Row.GetId() - 1;
-    if (prevRowIndex < 0)
-    {
-        prevRowIndex = TotalRowCount() - 1;
-    }
-
-    THROW_HR_IF(E_FAIL, Row.GetId() == _firstRow);
-    return _storage.at(prevRowIndex);
 }
 
 // Method Description:
@@ -1101,7 +1045,7 @@ ROW& TextBuffer::_GetPrevRowNoWrap(const ROW& Row)
 // - the delimiter class for the given char
 const DelimiterClass TextBuffer::_GetDelimiterClassAt(const COORD pos, const std::wstring_view wordDelimiters) const
 {
-    return GetRowByOffset(pos.Y).GetCharRow().DelimiterClassAt(pos.X, wordDelimiters);
+    return GetRowByOffset(pos.Y).DelimiterClassAt(pos.X, wordDelimiters);
 }
 
 // Method Description:
@@ -1366,7 +1310,7 @@ void TextBuffer::_PruneHyperlinks()
     // If the buffer does not contain the same reference, we can remove that hyperlink from our map
     // This way, obsolete hyperlink references are cleared from our hyperlink map instead of hanging around
     // Get all the hyperlink references in the row we're erasing
-    const auto hyperlinks = _storage.at(_firstRow).GetAttrRow().GetHyperlinks();
+    const auto hyperlinks = _storage.at(_firstRow).GetHyperlinks();
 
     if (!hyperlinks.empty())
     {
@@ -1382,7 +1326,7 @@ void TextBuffer::_PruneHyperlinks()
         // to see if those references are anywhere else
         for (size_t i = 1; i != total; ++i)
         {
-            const auto nextRowRefs = GetRowByOffset(i).GetAttrRow().GetHyperlinks();
+            const auto nextRowRefs = GetRowByOffset(i).GetHyperlinks();
             for (auto id : nextRowRefs)
             {
                 if (firstRowRefs.find(id) != firstRowRefs.end())
@@ -2257,8 +2201,7 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer,
         // Fetch the row and its "right" which is the last printable character.
         const auto& row = oldBuffer.GetRowByOffset(iOldRow);
         const auto cOldColsTotal = oldBuffer.GetLineWidth(iOldRow);
-        const auto& charRow = row.GetCharRow();
-        auto iRight = gsl::narrow_cast<short>(charRow.MeasureRight());
+        auto iRight = gsl::narrow_cast<short>(row.MeasureRight());
 
         // If we're starting a new row, try and preserve the line rendition
         // from the row in the original buffer.
@@ -2309,9 +2252,9 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer,
             try
             {
                 // TODO: MSFT: 19446208 - this should just use an iterator and the inserter...
-                const auto glyph = row.GetCharRow().GlyphAt(iOldCol);
-                const auto dbcsAttr = row.GetCharRow().DbcsAttrAt(iOldCol);
-                const auto textAttr = row.GetAttrRow().GetAttrByColumn(iOldCol);
+                const auto glyph = row.GlyphAt(iOldCol);
+                const auto dbcsAttr = row.DbcsAttrAt(iOldCol);
+                const auto textAttr = row.GetAttrByColumn(iOldCol);
 
                 if (!newBuffer.InsertCharacter(glyph, dbcsAttr, textAttr))
                 {
@@ -2355,8 +2298,8 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer,
             try
             {
                 // TODO: MSFT: 19446208 - this should just use an iterator and the inserter...
-                const auto textAttr = row.GetAttrRow().GetAttrByColumn(copyAttrCol);
-                if (!newRow.GetAttrRow().SetAttrToEnd(newAttrColumn, textAttr))
+                const auto textAttr = row.GetAttrByColumn(copyAttrCol);
+                if (!newRow.SetAttrToEnd(newAttrColumn, textAttr))
                 {
                     break;
                 }
@@ -2470,8 +2413,7 @@ HRESULT TextBuffer::Reflow(TextBuffer& oldBuffer,
         // the last attr when wider.
         auto& newRow = newBuffer.GetRowByOffset(newRowY);
         const auto newWidth = newBuffer.GetLineWidth(newRowY);
-        newRow.GetAttrRow() = row.GetAttrRow();
-        newRow.GetAttrRow().Resize(newWidth);
+        newRow.TransferAttributes(row.Attributes(), newWidth);
 
         newRowY++;
     }
@@ -2586,9 +2528,11 @@ uint16_t TextBuffer::GetHyperlinkId(std::wstring_view uri, std::wstring_view id)
     else
     {
         // assign _currentHyperlinkId if the custom id does not already exist
-        std::wstring newId{ id };
+        std::wstring newId;
+        newId.reserve(id.size() + uri.size());
+        newId.append(id);
+        newId.append(uri);
         // hash the URL and add it to the custom ID - GH#7698
-        newId += L"%" + std::to_wstring(til::hash(uri));
         const auto result = _hyperlinkCustomIdMap.emplace(newId, _currentHyperlinkId);
         if (result.second)
         {

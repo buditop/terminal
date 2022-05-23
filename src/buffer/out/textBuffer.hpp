@@ -54,7 +54,6 @@ filling in the last row, and updating the screen.
 #include "cursor.h"
 #include "Row.hpp"
 #include "TextAttribute.hpp"
-#include "UnicodeStorage.hpp"
 #include "../types/inc/Viewport.hpp"
 
 #include "../buffer/out/textBufferCellIterator.hpp"
@@ -74,6 +73,8 @@ public:
                const bool isActiveBuffer,
                Microsoft::Console::Render::Renderer& renderer);
     TextBuffer(const TextBuffer& a) = delete;
+
+    ~TextBuffer();
 
     // Used for duplicating properties to another text buffer
     void CopyProperties(const TextBuffer& OtherBuffer) noexcept;
@@ -139,9 +140,6 @@ public:
     void Reset();
 
     [[nodiscard]] HRESULT ResizeTraditional(const COORD newSize) noexcept;
-
-    const UnicodeStorage& GetUnicodeStorage() const noexcept;
-    UnicodeStorage& GetUnicodeStorage() noexcept;
 
     void SetAsActiveBuffer(const bool isActiveBuffer) noexcept;
     bool IsActiveBuffer() const noexcept;
@@ -216,54 +214,37 @@ public:
 
 private:
     void _UpdateSize();
-    Microsoft::Console::Types::Viewport _size;
-    std::vector<ROW> _storage;
-    Cursor _cursor;
-
-    SHORT _firstRow; // indexes top row (not necessarily 0)
-
-    TextAttribute _currentAttributes;
-
-    // storage location for glyphs that can't fit into the buffer normally
-    UnicodeStorage _unicodeStorage;
-
-    bool _isActiveBuffer;
-    Microsoft::Console::Render::Renderer& _renderer;
-
-    std::unordered_map<uint16_t, std::wstring> _hyperlinkMap;
-    std::unordered_map<std::wstring, uint16_t> _hyperlinkCustomIdMap;
-    uint16_t _currentHyperlinkId;
-
-    void _RefreshRowIDs(std::optional<SHORT> newRowWidth);
-
     void _SetFirstRowIndex(const SHORT FirstRowIndex) noexcept;
-
     COORD _GetPreviousFromCursor() const;
-
     void _SetWrapOnCurrentRow();
     void _AdjustWrapOnCurrentRow(const bool fSet);
-
     // Assist with maintaining proper buffer state for Double Byte character sequences
     bool _PrepareForDoubleByteSequence(const DbcsAttribute dbcsAttribute);
     bool _AssertValidDoubleByteSequence(const DbcsAttribute dbcsAttribute);
-
     ROW& _GetFirstRow();
-    ROW& _GetPrevRowNoWrap(const ROW& row);
-
     void _ExpandTextRow(SMALL_RECT& selectionRow) const;
-
     const DelimiterClass _GetDelimiterClassAt(const COORD pos, const std::wstring_view wordDelimiters) const;
     const COORD _GetWordStartForAccessibility(const COORD target, const std::wstring_view wordDelimiters) const;
     const COORD _GetWordStartForSelection(const COORD target, const std::wstring_view wordDelimiters) const;
     const COORD _GetWordEndForAccessibility(const COORD target, const std::wstring_view wordDelimiters, const COORD limit) const;
     const COORD _GetWordEndForSelection(const COORD target, const std::wstring_view wordDelimiters) const;
-
     void _PruneHyperlinks();
 
     static void _AppendRTFText(std::ostringstream& contentBuilder, const std::wstring_view& text);
 
+    Microsoft::Console::Render::Renderer& _renderer;
+    std::vector<ROW> _storage;
+    std::unordered_map<uint16_t, std::wstring> _hyperlinkMap;
+    std::unordered_map<std::wstring, uint16_t> _hyperlinkCustomIdMap;
     std::unordered_map<size_t, std::wstring> _idsAndPatterns;
-    size_t _currentPatternId;
+    TextAttribute _currentAttributes;
+    Cursor _cursor;
+    void* _charBuffer = nullptr;
+    Microsoft::Console::Types::Viewport _size;
+    uint16_t _currentHyperlinkId = 1;
+    size_t _currentPatternId = 0;
+    SHORT _firstRow = 0; // indexes top row (not necessarily 0)
+    bool _isActiveBuffer = false;
 
 #ifdef UNIT_TESTING
     friend class TextBufferTests;

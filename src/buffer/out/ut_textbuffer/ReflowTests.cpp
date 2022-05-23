@@ -737,34 +737,22 @@ class ReflowTests
     {
         auto buffer = std::make_unique<TextBuffer>(testBuffer.size, TextAttribute{ 0x7 }, 0, false, renderer);
 
-        size_t i{};
+        size_t y = 0;
         for (const auto& testRow : testBuffer.rows)
         {
-            auto& row{ buffer->GetRowByOffset(i) };
+            auto& row{ buffer->GetRowByOffset(y) };
 
-            auto& charRow{ row.GetCharRow() };
             row.SetWrapForced(testRow.wrap);
 
-            size_t j{};
-            for (auto it{ charRow.begin() }; it != charRow.end(); ++it)
+            size_t x = 0;
+            for (const auto& ch : testRow.text)
             {
-                // Yes, we're about to manually create a buffer. It is unpleasant.
-                const auto ch{ til::at(testRow.text, j) };
-                it->Char() = ch;
-                if (IsGlyphFullWidth(ch))
-                {
-                    it->DbcsAttr().SetLeading();
-                    it++;
-                    it->Char() = ch;
-                    it->DbcsAttr().SetTrailing();
-                }
-                else
-                {
-                    it->DbcsAttr().SetSingle();
-                }
-                j++;
+                const size_t width = IsGlyphFullWidth(ch) ? 2 : 1;
+                row.Replace(x, width, { &ch, 1 });
+                x += width;
             }
-            i++;
+
+            y++;
         }
 
         buffer->GetCursor().SetPosition(testBuffer.cursor);
@@ -783,42 +771,42 @@ class ReflowTests
         VERIFY_ARE_EQUAL(testBuffer.cursor, buffer.GetCursor().GetPosition());
         VERIFY_ARE_EQUAL(testBuffer.size, buffer.GetSize().Dimensions());
 
-        size_t i{};
+        size_t y = 0;
         for (const auto& testRow : testBuffer.rows)
         {
             NoThrowString indexString;
-            const auto& row{ buffer.GetRowByOffset(i) };
+            const auto& row{ buffer.GetRowByOffset(y) };
 
-            const auto& charRow{ row.GetCharRow() };
-
-            indexString.Format(L"[Row %d]", i);
+            indexString.Format(L"[Row %d]", y);
             VERIFY_ARE_EQUAL(testRow.wrap, row.WasWrapForced(), indexString);
 
-            size_t j{};
-            for (auto it{ charRow.begin() }; it != charRow.end(); ++it)
+            size_t x = 0;
+            size_t i = 0;
+            for (const auto& ch : testRow.text)
             {
-                indexString.Format(L"[Cell %d, %d; Text line index %d]", it - charRow.begin(), i, j);
-                // Yes, we're about to manually create a buffer. It is unpleasant.
-                const auto ch{ til::at(testRow.text, j) };
+                indexString.Format(L"[Cell %d, %d; Text line index %d]", x, y, i);
+                
                 if (IsGlyphFullWidth(ch))
                 {
                     // Char is full width in test buffer, so
                     // ensure that real buffer is LEAD, TRAIL (ch)
-                    VERIFY_IS_TRUE(it->DbcsAttr().IsLeading(), indexString);
-                    VERIFY_ARE_EQUAL(ch, it->Char(), indexString);
-
-                    it++;
-                    VERIFY_IS_TRUE(it->DbcsAttr().IsTrailing(), indexString);
+                    VERIFY_IS_TRUE(row.DbcsAttrAt(x).IsLeading(), indexString);
+                    VERIFY_ARE_EQUAL(ch, row.GlyphAt(x).front(), indexString);
+                    ++x;
+                    
+                    VERIFY_IS_TRUE(row.DbcsAttrAt(x).IsTrailing(), indexString);
+                    VERIFY_ARE_EQUAL(ch, row.GlyphAt(x).front(), indexString);
+                    ++x;
                 }
                 else
                 {
-                    VERIFY_IS_TRUE(it->DbcsAttr().IsSingle(), indexString);
+                    VERIFY_IS_TRUE(row.DbcsAttrAt(x).IsSingle(), indexString);
+                    VERIFY_ARE_EQUAL(ch, row.GlyphAt(x).front(), indexString);
+                    ++x;
                 }
-
-                VERIFY_ARE_EQUAL(ch, it->Char(), indexString);
-                j++;
             }
-            i++;
+            
+            y++;
         }
     }
 

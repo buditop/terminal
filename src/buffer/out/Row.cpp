@@ -3,29 +3,37 @@
 
 #include "precomp.h"
 #include "Row.hpp"
-#include "CharRow.hpp"
 #include "textBuffer.hpp"
 #include "../types/inc/convert.hpp"
+
+#include <intrin.h>
+
+#pragma warning(push, 1)
 
 // Routine Description:
 // - constructor
 // Arguments:
-// - rowId - the row index in the text buffer
 // - rowWidth - the width of the row, cell elements
 // - fillAttribute - the default text attribute
-// - pParent - the text buffer that this row belongs to
 // Return Value:
 // - constructed object
-ROW::ROW(const SHORT rowId, const unsigned short rowWidth, const TextAttribute fillAttribute, TextBuffer* const pParent) :
-    _id{ rowId },
-    _rowWidth{ rowWidth },
-    _charRow{ rowWidth, this },
-    _attrRow{ rowWidth, fillAttribute },
+ROW::ROW(wchar_t* buffer, uint16_t* indices, const unsigned short rowWidth, const TextAttribute& fillAttribute) :
+    _chars{ buffer },
+    _charsCapacity{ rowWidth },
+    _indices{ indices },
+    _indicesCount{ rowWidth },
+    // til::rle needs at least 1 element for resize_trailing_extent() to work correctly.
+    _attr{ std::max<uint16_t>(1, rowWidth), fillAttribute },
     _lineRendition{ LineRendition::SingleWidth },
     _wrapForced{ false },
-    _doubleBytePadded{ false },
-    _pParent{ pParent }
+    _doubleBytePadded{ false }
 {
+    if (buffer)
+    {
+        // TODO
+        wmemset(_chars, UNICODE_SPACE, _indicesCount);
+        std::iota(_indices, _indices + _indicesCount + 1, static_cast<uint16_t>(0));
+    }
 }
 
 // Routine Description:
@@ -34,42 +42,17 @@ ROW::ROW(const SHORT rowId, const unsigned short rowWidth, const TextAttribute f
 // - Attr - The default attribute (color) to fill
 // Return Value:
 // - <none>
-bool ROW::Reset(const TextAttribute Attr)
+bool ROW::Reset(const TextAttribute& Attr)
 {
+    wmemset(_chars, UNICODE_SPACE, _indicesCount);
+    std::iota(_indices, _indices + _indicesCount + 1, static_cast<uint16_t>(0));
+
+    _attr = { gsl::narrow_cast<uint16_t>(_indicesCount), Attr };
     _lineRendition = LineRendition::SingleWidth;
     _wrapForced = false;
     _doubleBytePadded = false;
-    _charRow.Reset();
-    try
-    {
-        _attrRow.Reset(Attr);
-    }
-    catch (...)
-    {
-        LOG_CAUGHT_EXCEPTION();
-        return false;
-    }
+
     return true;
-}
-
-// Routine Description:
-// - resizes ROW to new width
-// Arguments:
-// - width - the new width, in cells
-// Return Value:
-// - S_OK if successful, otherwise relevant error
-[[nodiscard]] HRESULT ROW::Resize(const unsigned short width)
-{
-    RETURN_IF_FAILED(_charRow.Resize(width));
-    try
-    {
-        _attrRow.Resize(width);
-    }
-    CATCH_RETURN();
-
-    _rowWidth = width;
-
-    return S_OK;
 }
 
 // Routine Description:
@@ -80,18 +63,8 @@ bool ROW::Reset(const TextAttribute Attr)
 // - <none>
 void ROW::ClearColumn(const size_t column)
 {
-    THROW_HR_IF(E_INVALIDARG, column >= _charRow.size());
-    _charRow.ClearCell(column);
-}
-
-UnicodeStorage& ROW::GetUnicodeStorage() noexcept
-{
-    return _pParent->GetUnicodeStorage();
-}
-
-const UnicodeStorage& ROW::GetUnicodeStorage() const noexcept
-{
-    return _pParent->GetUnicodeStorage();
+    THROW_HR_IF(E_INVALIDARG, column >= size());
+    ClearCell(column);
 }
 
 // Routine Description:
@@ -105,11 +78,11 @@ const UnicodeStorage& ROW::GetUnicodeStorage() const noexcept
 // - iterator to first cell that was not written to this row.
 OutputCellIterator ROW::WriteCells(OutputCellIterator it, const size_t index, const std::optional<bool> wrap, std::optional<size_t> limitRight)
 {
-    THROW_HR_IF(E_INVALIDARG, index >= _charRow.size());
-    THROW_HR_IF(E_INVALIDARG, limitRight.value_or(0) >= _charRow.size());
+    THROW_HR_IF(E_INVALIDARG, index >= size());
+    THROW_HR_IF(E_INVALIDARG, limitRight.value_or(0) >= size());
 
     // If we're given a right-side column limit, use it. Otherwise, the write limit is the final column index available in the char row.
-    const auto finalColumnInRow = limitRight.value_or(_charRow.size() - 1);
+    const auto finalColumnInRow = limitRight.value_or(size() - 1);
 
     auto currentColor = it->TextAttr();
     uint16_t colorUses = 0;
@@ -131,7 +104,7 @@ OutputCellIterator ROW::WriteCells(OutputCellIterator it, const size_t index, co
             {
                 // Otherwise, commit this color into the run and save off the new one.
                 // Now commit the new color runs into the attr row.
-                _attrRow.Replace(colorStarts, currentIndex, currentColor);
+                Replace(colorStarts, currentIndex, currentColor);
                 currentColor = it->TextAttr();
                 colorUses = 1;
                 colorStarts = currentIndex;
@@ -151,20 +124,19 @@ OutputCellIterator ROW::WriteCells(OutputCellIterator it, const size_t index, co
             // Don't increment iterator. We'll advance the index and try again with this value on the next round through the loop.
             if (currentIndex == 0 && it->DbcsAttr().IsTrailing())
             {
-                _charRow.ClearCell(currentIndex);
+                ClearCell(currentIndex);
             }
             // If we're trying to fill the last cell with a leading byte, pad it out instead by clearing it.
             // Don't increment iterator. We'll exit because we couldn't write a lead at the end of a line.
             else if (fillingLastColumn && it->DbcsAttr().IsLeading())
             {
-                _charRow.ClearCell(currentIndex);
+                ClearCell(currentIndex);
                 SetDoubleBytePadded(true);
             }
             // Otherwise, copy the data given and increment the iterator.
             else
             {
-                _charRow.DbcsAttrAt(currentIndex) = it->DbcsAttr();
-                _charRow.GlyphAt(currentIndex) = it->Chars();
+                Replace(currentIndex, it->DbcsAttr(), it->Chars());
                 ++it;
             }
 
@@ -191,8 +163,90 @@ OutputCellIterator ROW::WriteCells(OutputCellIterator it, const size_t index, co
     // Now commit the final color into the attr row
     if (colorUses)
     {
-        _attrRow.Replace(colorStarts, currentIndex, currentColor);
+        Replace(colorStarts, currentIndex, currentColor);
     }
 
     return it;
 }
+
+void ROW::Replace(size_t x, size_t width, const std::wstring_view& chars)
+{
+    const auto new0 = std::min(x, _indicesCount);
+    const auto new1 = std::min(new0 + width, _indicesCount);
+    auto old0 = new0;
+    auto old1 = new1;
+    const auto ch0 = _indices[new0];
+    uint16_t ch1;
+
+    for (; old0 != 0 && _indices[old0 - 1] == ch0; --old0)
+    {
+    }
+
+    for (; (ch1 = _indices[old1]) == ch0; ++old1)
+    {
+    }
+
+    const auto leadingSpaces = new0 - old0;
+    const auto trailingSpaces = old1 - new1;
+    const auto insertedChars = chars.size() + leadingSpaces + trailingSpaces;
+    const auto newRhs = insertedChars + ch0;
+    const auto diff = newRhs - ch1;
+
+    if (diff != 0)
+    {
+        const auto currentLength = _indices[_indicesCount];
+        const auto newLength = _indices[_indicesCount] + diff;
+
+        if (newLength <= _charsCapacity)
+        {
+            std::copy_n(_chars + ch1, currentLength - ch1, _chars + newRhs);
+        }
+        else
+        {
+            const auto newCapacity = std::max(newLength, _charsCapacity + (_charsCapacity >> 1));
+            const auto chars = static_cast<wchar_t*>(::operator new[](sizeof(wchar_t) * newCapacity));
+
+            std::copy_n(_chars, ch0, chars);
+            std::copy_n(_chars + ch1, currentLength - ch1, chars + newRhs);
+
+            if (_charsCapacity != _indicesCount)
+            {
+                ::operator delete[](_chars);
+            }
+
+            _chars = chars;
+            _charsCapacity = newCapacity;
+        }
+
+        for (auto it = &_indices[new1], end = &_indices[_indicesCount + 1]; it != end; ++it)
+        {
+            *it += diff;
+        }
+    }
+
+    {
+        auto it = _chars + ch0;
+        it = std::fill_n(it, leadingSpaces, L' ');
+        it = std::copy_n(chars.data(), chars.size(), it);
+        it = std::fill_n(it, trailingSpaces, L' ');
+    }
+
+    {
+        auto col = gsl::narrow_cast<uint16_t>(old0);
+        auto it = _indices + col;
+        for (; col < new0; ++col)
+        {
+            *it++ = col;
+        }
+        for (const auto c = col; col < new1; ++col)
+        {
+            *it++ = c;
+        }
+        for (; col < old1; ++col)
+        {
+            *it++ = col;
+        }
+    }
+}
+
+#pragma warning(pop)
