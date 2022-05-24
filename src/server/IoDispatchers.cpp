@@ -178,27 +178,15 @@ static bool _shouldAttemptHandoff(const Globals& globals,
 
 #else
 
-    // Service desktops and non-interactive sessions should not
-    // try to hand off -- they probably don't have any terminals
-    // installed, and we don't want to risk breaking a service if
-    // they *do*.
-    if (!_isInteractiveUserSession())
+    // If we do not have a registered handoff, do not attempt.
+    if (!globals.handoffConsoleClsid)
     {
         return false;
     }
 
-    // This console was started with a command line argument to
-    // specifically block handoff to another console. We presume
-    // this was for good reason (compatibility) and give up here.
-    if (globals.launchArgs.GetForceNoHandoff())
-    {
-        return false;
-    }
-
-    // Someone double clicked this console or explicitly tried
-    // to use it to launch a child process. Host it within this one
-    // and do not hand off.
-    if (globals.launchArgs.ShouldCreateServerHandle())
+    // If we're already a target for receiving another handoff,
+    // do not chain.
+    if (globals.handoffTarget)
     {
         return false;
     }
@@ -220,21 +208,33 @@ static bool _shouldAttemptHandoff(const Globals& globals,
         return false;
     }
 
+    // This console was started with a command line argument to
+    // specifically block handoff to another console. We presume
+    // this was for good reason (compatibility) and give up here.
+    if (globals.launchArgs.GetForceNoHandoff())
+    {
+        return false;
+    }
+
+    // Someone double clicked this console or explicitly tried
+    // to use it to launch a child process. Host it within this one
+    // and do not hand off.
+    if (globals.launchArgs.ShouldCreateServerHandle())
+    {
+        return false;
+    }
+
     // If it is a PTY session, do not attempt handoff.
     if (globals.launchArgs.IsHeadless())
     {
         return false;
     }
 
-    // If we do not have a registered handoff, do not attempt.
-    if (!globals.handoffConsoleClsid)
-    {
-        return false;
-    }
-
-    // If we're already a target for receiving another handoff,
-    // do not chain.
-    if (globals.handoffTarget)
+    // Service desktops and non-interactive sessions should not
+    // try to hand off -- they probably don't have any terminals
+    // installed, and we don't want to risk breaking a service if
+    // they *do*.
+    if (!_isInteractiveUserSession())
     {
         return false;
     }
