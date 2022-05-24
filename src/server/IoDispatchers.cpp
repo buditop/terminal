@@ -290,6 +290,7 @@ static void attemptHandoff(Globals& Globals, const CONSOLE_INFORMATION& gci, CON
             ::Microsoft::WRL::ComPtr<IDefaultTerminalMarker> marker;
             if (FAILED(handoff.As(&marker)))
             {
+                Globals.handoffConsoleClsid.reset();
                 Globals.defaultTerminalMarkerCheckRequired = false;
                 return;
             }
