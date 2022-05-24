@@ -42,6 +42,8 @@ using namespace Microsoft::Console::Render;
 const UINT CONSOLE_EVENT_FAILURE_ID = 21790;
 const UINT CONSOLE_LPC_PORT_FAILURE_ID = 21791;
 
+DEFINE_GUID(CLSID_SystemDelegationTerminal, 0xe12cff52, 0xa866, 0x4c77, 0x9a, 0x90, 0xf5, 0x70, 0xa7, 0xaa, 0x2c, 0x6b);
+
 [[nodiscard]] HRESULT ConsoleServerInitialization(_In_ HANDLE Server, const ConsoleArguments* const args)
 try
 {
@@ -68,7 +70,7 @@ try
     if (SUCCEEDED(Microsoft::Console::Internal::DefaultApp::CheckDefaultAppPolicy(isEnabled)) && isEnabled)
     {
         IID delegationClsid;
-        if (SUCCEEDED(DelegationConfig::s_GetDefaultConsoleId(delegationClsid)))
+        if (SUCCEEDED(DelegationConfig::s_GetDefaultConsoleId(delegationClsid, Globals.defaultTerminalMarkerCheckRequired)))
         {
             Globals.handoffConsoleClsid = delegationClsid;
             TraceLoggingWrite(g_hConhostV2EventTraceProvider,
@@ -428,7 +430,7 @@ try
     g.handoffTarget = true;
 
     IID delegationClsid;
-    if (SUCCEEDED(DelegationConfig::s_GetDefaultConsoleId(delegationClsid)))
+    if (SUCCEEDED(DelegationConfig::s_GetDefaultConsoleId(delegationClsid, g.defaultTerminalMarkerCheckRequired)))
     {
         g.handoffConsoleClsid = delegationClsid;
     }
@@ -439,11 +441,7 @@ try
 
     if (!g.handoffTerminalClsid)
     {
-        TraceLoggingWrite(g_hConhostV2EventTraceProvider,
-                          "SrvInit_ReceiveHandoff_NoTerminal",
-                          TraceLoggingLevel(WINEVENT_LEVEL_VERBOSE),
-                          TraceLoggingKeyword(TIL_KEYWORD_TRACE));
-        return E_NOT_SET;
+        g.handoffTerminalClsid = CLSID_SystemDelegationTerminal;
     }
 
     TraceLoggingWrite(g_hConhostV2EventTraceProvider,

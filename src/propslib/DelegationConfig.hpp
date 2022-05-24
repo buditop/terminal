@@ -20,10 +20,10 @@ class DelegationConfig
 public:
     struct PkgVersion
     {
-        unsigned short major;
-        unsigned short minor;
-        unsigned short build;
-        unsigned short revision;
+        unsigned short major = 0;
+        unsigned short minor = 0;
+        unsigned short build = 0;
+        unsigned short revision = 0;
 
         bool operator==(const PkgVersion& other) const
         {
@@ -36,12 +36,13 @@ public:
 
     struct DelegationBase
     {
-        CLSID clsid;
+        CLSID clsid{};
         std::wstring name;
         std::wstring author;
         std::wstring pfn;
         std::wstring logo;
         PkgVersion version;
+        bool allowDefaultTerminalHandoff = false;
 
         bool IsFromSamePackage(const DelegationBase& other) const
         {
@@ -53,11 +54,7 @@ public:
 
         bool operator==(const DelegationBase& other) const
         {
-            return clsid == other.clsid &&
-                   name == other.name &&
-                   author == other.author &&
-                   pfn == other.pfn &&
-                   version == other.version;
+            return clsid == other.clsid;
         }
     };
 
@@ -85,7 +82,7 @@ public:
 
     [[nodiscard]] static HRESULT s_SetDefaultByPackage(const DelegationPackage& pkg, const bool useRegExe = false) noexcept;
 
-    [[nodiscard]] static HRESULT s_GetDefaultConsoleId(IID& iid) noexcept;
+    [[nodiscard]] static HRESULT s_GetDefaultConsoleId(IID& iid, bool& isTerminalAsDefault) noexcept;
     [[nodiscard]] static HRESULT s_GetDefaultTerminalId(IID& iid) noexcept;
 
 private:

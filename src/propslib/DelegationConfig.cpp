@@ -127,6 +127,12 @@ HRESULT _lookupCatalog(PCWSTR extensionName, std::vector<T>& vec) noexcept
         ComPtr<IMap<HSTRING, IInspectable*>> map;
         RETURN_IF_FAILED(properties.As(&map));
 
+        {
+            boolean allowDefaultTerminalHandoff;
+            RETURN_IF_FAILED(map->HasKey(HStringReference(L"AllowDefaultTerminalHandoff").Get(), &allowDefaultTerminalHandoff));
+            extensionMetadata.allowDefaultTerminalHandoff = allowDefaultTerminalHandoff;
+        }
+
         // Looking it up is going to get us an inspectable
         ComPtr<IInspectable> inspectable;
         RETURN_IF_FAILED(map->Lookup(HStringReference(L"Clsid").Get(), &inspectable));
@@ -225,7 +231,8 @@ try
     // We also find the default here while we have the list of available ones so
     // we can return the opaque structure instead of the raw IID.
     IID defCon;
-    LOG_IF_FAILED(s_GetDefaultConsoleId(defCon));
+    bool isTerminalAsDefault;
+    LOG_IF_FAILED(s_GetDefaultConsoleId(defCon, isTerminalAsDefault));
     IID defTerm;
     LOG_IF_FAILED(s_GetDefaultTerminalId(defTerm));
 
@@ -238,7 +245,10 @@ try
     {
         if (pkg.console.clsid == defCon && pkg.terminal.clsid == defTerm)
         {
-            chosenPackage = pkg;
+            if (!isTerminalAsDefault || pkg.console.allowDefaultTerminalHandoff)
+            {
+                chosenPackage = pkg;
+            }
             break;
         }
     }
@@ -266,20 +276,22 @@ CATCH_RETURN()
     return S_OK;
 }
 
-[[nodiscard]] HRESULT DelegationConfig::s_GetDefaultConsoleId(IID& iid) noexcept
+[[nodiscard]] HRESULT DelegationConfig::s_GetDefaultConsoleId(IID& iid, bool& isTerminalAsDefault) noexcept
 {
     iid = { 0 };
+    isTerminalAsDefault = false;
 
     auto hr = s_Get(DELEGATION_CONSOLE_KEY_NAME, iid);
 
-    auto defApp = false;
-    if (SUCCEEDED(Microsoft::Console::Internal::DefaultApp::CheckShouldTerminalBeDefault(defApp)) && defApp)
+    if (FAILED(hr))
     {
-        if (FAILED(hr))
+        auto defApp = false;
+        if (SUCCEEDED(Microsoft::Console::Internal::DefaultApp::CheckShouldTerminalBeDefault(defApp)) && defApp)
         {
             // If we can't find a user-defined delegation console/terminal, use the hardcoded
             // delegation console/terminal instead.
             iid = CLSID_SystemDelegationConsole;
+            isTerminalAsDefault = true;
             hr = S_OK;
         }
     }
@@ -293,10 +305,10 @@ CATCH_RETURN()
 
     auto hr = s_Get(DELEGATION_TERMINAL_KEY_NAME, iid);
 
-    auto defApp = false;
-    if (SUCCEEDED(Microsoft::Console::Internal::DefaultApp::CheckShouldTerminalBeDefault(defApp)) && defApp)
+    if (FAILED(hr))
     {
-        if (FAILED(hr))
+        auto defApp = false;
+        if (SUCCEEDED(Microsoft::Console::Internal::DefaultApp::CheckShouldTerminalBeDefault(defApp)) && defApp)
         {
             // If we can't find a user-defined delegation console/terminal, use the hardcoded
             // delegation console/terminal instead.
